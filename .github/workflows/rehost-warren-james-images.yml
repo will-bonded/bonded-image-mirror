@@ -1,0 +1,79 @@
+name: Rehost Warren James Images
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  rehost:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and rehost images
+        run: |
+          python3 << 'PYEOF'
+          import csv, os, ssl, time, base64, urllib.request
+
+          # warrenjames.co.uk's server does not send the Sectigo intermediate
+          # certificate during the TLS handshake. Browsers paper over this by
+          # fetching/caching the missing cert automatically (AIA chasing);
+          # Python's default SSL verification does not do this, so we fetch
+          # the same intermediate explicitly and add it to the trust context.
+          # This performs real certificate verification -- it does not
+          # disable or bypass it.
+          INTERMEDIATE_URL = "http://crt.sectigo.com/SectigoPublicServerAuthenticationCADVR36.crt"
+          with urllib.request.urlopen(INTERMEDIATE_URL, timeout=20) as r:
+              der_bytes = r.read()
+          pem = (
+              "-----BEGIN CERTIFICATE-----\n"
+              + base64.encodebytes(der_bytes).decode()
+              + "-----END CERTIFICATE-----\n"
+          )
+
+          ctx = ssl.create_default_context()
+          ctx.load_verify_locations(cadata=pem)
+
+          os.makedirs("images/warren-james", exist_ok=True)
+
+          with open("data/warren-james-images.csv", newline="", encoding="utf-8") as f:
+              rows = list(csv.DictReader(f))
+
+          headers = {"User-Agent": "Mozilla/5.0 (compatible; BondedImageMirror/1.0)"}
+          failures = []
+          for row in rows:
+              url = row["image_url"]
+              filename = row["filename"]
+              dest = os.path.join("images/warren-james", filename)
+              ok = False
+              for attempt in range(3):
+                  try:
+                      req = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                          data = resp.read()
+                      with open(dest, "wb") as out:
+                          out.write(data)
+                      print(f"OK {filename} ({len(data)} bytes)")
+                      ok = True
+                      break
+                  except Exception as e:
+                      print(f"Attempt {attempt + 1} failed for {filename}: {e}")
+                      time.sleep(2)
+              if not ok:
+                  failures.append(filename)
+
+          print(f"\nDone. {len(rows) - len(failures)}/{len(rows)} succeeded.")
+          if failures:
+              print("FAILED:", failures)
+              raise SystemExit(1)
+          PYEOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add images/warren-james
+          git diff --staged --quiet || git commit -m "Rehost Warren James product images (SSL chain workaround)"
+          git push
